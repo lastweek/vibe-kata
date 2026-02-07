@@ -18,3 +18,6 @@ run/
 
 # Test artifacts
 *.log
+
+# Downloaded rootfs (too large for repo)
+tests/bundle/rootfs/
