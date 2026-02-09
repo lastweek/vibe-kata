@@ -11,11 +11,12 @@
 #include <limits.h>
 #include <sys/syscall.h>
 
+#include "nk_container.h"
+#include "nk_log.h"
+
 #ifndef __NR_pivot_root
 #define __NR_pivot_root 155
 #endif
-
-#include "nk_container.h"
 
 /* Default mounts for container */
 static const struct {
@@ -40,7 +41,21 @@ static const struct {
  */
 static int nk_mount_make_private(const char *path) {
     if (mount(NULL, path, NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
-        fprintf(stderr, "Error: Failed to make %s private: %s\n",
+        /*
+         * MS_PRIVATE requires a mountpoint. If the rootfs path is a plain
+         * directory, first bind-mount it to itself and retry.
+         */
+        if (errno == EINVAL) {
+            if (mount(path, path, NULL, MS_BIND | MS_REC, NULL) == -1) {
+                nk_stderr( "Error: Failed to bind mount %s: %s\n",
+                        path, strerror(errno));
+                return -1;
+            }
+            if (mount(NULL, path, NULL, MS_REC | MS_PRIVATE, NULL) == 0) {
+                return 0;
+            }
+        }
+        nk_stderr( "Error: Failed to make %s private: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -54,7 +69,7 @@ __attribute__((unused))
 static int nk_mount_bind(const char *source, const char *target, unsigned long flags) {
     /* First do a basic bind mount */
     if (mount(source, target, NULL, MS_BIND | MS_REC, NULL) == -1) {
-        fprintf(stderr, "Error: Failed to bind mount %s to %s: %s\n",
+        nk_stderr( "Error: Failed to bind mount %s to %s: %s\n",
                 source, target, strerror(errno));
         return -1;
     }
@@ -62,7 +77,7 @@ static int nk_mount_bind(const char *source, const char *target, unsigned long f
     /* Then remount with flags if specified */
     if (flags != 0) {
         if (mount(source, target, NULL, MS_BIND | MS_REMOUNT | flags, NULL) == -1) {
-            fprintf(stderr, "Error: Failed to remount %s: %s\n",
+            nk_stderr( "Error: Failed to remount %s: %s\n",
                     target, strerror(errno));
             return -1;
         }
@@ -79,7 +94,7 @@ static int nk_mount_create_device(const char *path, unsigned int mode, int major
     (void)dev;  /* Will be used when device creation is completed */
 
     if (mknod(path, S_IFCHR | mode, 0600) == -1) {
-        fprintf(stderr, "Error: Failed to create device %s: %s\n",
+        nk_stderr( "Error: Failed to create device %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -120,22 +135,22 @@ static int nk_mount_setup_dev(const char *rootfs) {
     /* Create symlinks */
     snprintf(path, sizeof(path), "%s/dev/fd", rootfs);
     if (symlink("/proc/self/fd", path) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
+        nk_stderr( "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
     }
 
     snprintf(path, sizeof(path), "%s/dev/stdin", rootfs);
     if (symlink("/proc/self/fd/0", path) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
+        nk_stderr( "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
     }
 
     snprintf(path, sizeof(path), "%s/dev/stdout", rootfs);
     if (symlink("/proc/self/fd/1", path) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
+        nk_stderr( "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
     }
 
     snprintf(path, sizeof(path), "%s/dev/stderr", rootfs);
     if (symlink("/proc/self/fd/2", path) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
+        nk_stderr( "Warning: Failed to create symlink %s: %s\n", path, strerror(errno));
     }
 
     return 0;
@@ -150,34 +165,34 @@ static int nk_mount_pivot_root(const char *new_root) {
     snprintf(put_old, sizeof(put_old), "%s/.pivot_old", new_root);
 
     if (mkdir(put_old, 0700) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Error: Failed to create %s: %s\n",
+        nk_stderr( "Error: Failed to create %s: %s\n",
                 put_old, strerror(errno));
         return -1;
     }
 
     /* Bind mount new root to itself to ensure it's a mount point */
     if (mount(new_root, new_root, NULL, MS_BIND | MS_REC, NULL) == -1) {
-        fprintf(stderr, "Error: Failed to bind mount %s: %s\n",
+        nk_stderr( "Error: Failed to bind mount %s: %s\n",
                 new_root, strerror(errno));
         return -1;
     }
 
     /* Pivot root */
     if (syscall(__NR_pivot_root, new_root, put_old) == -1) {
-        fprintf(stderr, "Error: Failed to pivot_root: %s\n", strerror(errno));
+        nk_stderr( "Error: Failed to pivot_root: %s\n", strerror(errno));
         return -1;
     }
 
     /* Change to new root */
     if (chdir("/") == -1) {
-        fprintf(stderr, "Error: Failed to chdir to new root: %s\n",
+        nk_stderr( "Error: Failed to chdir to new root: %s\n",
                 strerror(errno));
         return -1;
     }
 
     /* Unmount old root */
     if (umount2("/.pivot_old", MNT_DETACH) == -1) {
-        fprintf(stderr, "Warning: Failed to unmount old root: %s\n",
+        nk_stderr( "Warning: Failed to unmount old root: %s\n",
                 strerror(errno));
     }
 
@@ -192,18 +207,26 @@ static int nk_mount_pivot_root(const char *new_root) {
  */
 int nk_container_setup_rootfs(const nk_container_ctx_t *ctx) {
     if (!ctx || !ctx->rootfs) {
-        fprintf(stderr, "Error: No rootfs specified\n");
+        nk_log_error("No rootfs specified");
         return -1;
     }
 
-    printf("  Setting up rootfs: %s\n", ctx->rootfs);
+    nk_log_debug("Setting up root filesystem: %s", ctx->rootfs);
+    nk_log_info("Setting up rootfs: %s", ctx->rootfs);
+
+    if (nk_log_educational) {
+        nk_log_explain_op("Making rootfs private mount",
+            "Prevents mount propagation from host. Container's mount changes stay isolated.");
+    }
 
     /* Make rootfs mount private */
     if (nk_mount_make_private(ctx->rootfs) == -1) {
         return -1;
     }
+    nk_log_debug("Rootfs marked as private mount");
 
     /* Mount default filesystems */
+    nk_log_debug("Mounting container filesystems");
     for (size_t i = 0; i < DEFAULT_MOUNTS_COUNT; i++) {
         char target[PATH_MAX];
         snprintf(target, sizeof(target), "%s%s", ctx->rootfs, default_mounts[i].target);
@@ -212,8 +235,7 @@ int nk_container_setup_rootfs(const nk_container_ctx_t *ctx) {
         struct stat st;
         if (stat(target, &st) == -1) {
             if (mkdir(target, 0755) == -1) {
-                fprintf(stderr, "Error: Failed to create %s: %s\n",
-                        target, strerror(errno));
+                nk_log_warn("Failed to create %s: %s", target, strerror(errno));
                 continue;
             }
         }
@@ -223,21 +245,31 @@ int nk_container_setup_rootfs(const nk_container_ctx_t *ctx) {
                   default_mounts[i].type,
                   default_mounts[i].flags,
                   default_mounts[i].options) == -1) {
-            fprintf(stderr, "Warning: Failed to mount %s to %s: %s\n",
+            nk_log_warn("Failed to mount %s to %s: %s",
                     default_mounts[i].type, target, strerror(errno));
+        } else {
+            nk_log_debug("Mounted %s on %s", default_mounts[i].type, default_mounts[i].target);
         }
     }
 
     /* Setup device nodes */
+    nk_log_debug("Creating device nodes");
     nk_mount_setup_dev(ctx->rootfs);
 
     /* Pivot root */
+    if (nk_log_educational) {
+        nk_log_explain_op("Pivoting root filesystem",
+            "Atomic swap of root directory. pivot_root() is safer than chroot() for containers. "
+            "Old root becomes /.pivot_old and is unmounted.");
+    }
+
     if (nk_mount_pivot_root(ctx->rootfs) == -1) {
-        fprintf(stderr, "Error: Failed to pivot root\n");
+        nk_log_error("Failed to pivot root");
         return -1;
     }
 
-    printf("  Root filesystem ready\n");
+    nk_log_debug("Root filesystem ready");
+    nk_log_info("Root filesystem ready");
     return 0;
 }
 
@@ -258,7 +290,7 @@ int nk_container_mount_custom(const nk_oci_mount_t *mounts, size_t len,
         struct stat st;
         if (stat(target, &st) == -1) {
             if (mkdir(target, 0755) == -1) {
-                fprintf(stderr, "Error: Failed to create %s: %s\n",
+                nk_stderr( "Error: Failed to create %s: %s\n",
                         target, strerror(errno));
                 continue;
             }
@@ -282,10 +314,10 @@ int nk_container_mount_custom(const nk_oci_mount_t *mounts, size_t len,
 
         /* Perform mount */
         if (mount(mounts[i].source, target, mounts[i].type, flags, NULL) == -1) {
-            fprintf(stderr, "Warning: Failed to mount %s to %s: %s\n",
+            nk_stderr( "Warning: Failed to mount %s to %s: %s\n",
                     mounts[i].source, target, strerror(errno));
         } else {
-            printf("  Mounted: %s -> %s\n", mounts[i].source, mounts[i].destination);
+            nk_log_info("Mounted: %s -> %s", mounts[i].source, mounts[i].destination);
         }
     }
 

@@ -5,12 +5,84 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include <jansson.h>
 
 #include "nk.h"
+#include "nk_log.h"
 
-#define NK_STATE_DIR "run"
 #define STATE_FILE "state.json"
+#define NS_STATE_DIR_ROOT "/run/nano-sandbox"
+#define NS_STATE_DIR_USER_SUFFIX "/.local/share/nano-sandbox/run"
+
+static int mkdir_p(const char *path, mode_t mode) {
+    char tmp[PATH_MAX];
+    size_t len;
+
+    if (!path || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    len = strnlen(path, sizeof(tmp));
+    if (len == 0 || len >= sizeof(tmp)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(tmp, path, len + 1);
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, mode) == -1 && errno != EEXIST) {
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+
+    if (mkdir(tmp, mode) == -1 && errno != EEXIST) {
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Get state directory from environment or robust defaults */
+static const char *get_state_dir(void) {
+    const char *dir = getenv("NS_RUN_DIR");
+    static char user_dir[PATH_MAX];
+    const char *home;
+    int n;
+
+    if (dir && dir[0] != '\0') {
+        return dir;
+    }
+
+    /* Backward compatibility for older scripts */
+    dir = getenv("NK_RUN_DIR");
+    if (dir && dir[0] != '\0') {
+        return dir;
+    }
+
+    if (geteuid() == 0) {
+        return NS_STATE_DIR_ROOT;
+    }
+
+    home = getenv("HOME");
+    if (home && home[0] != '\0') {
+        n = snprintf(user_dir, sizeof(user_dir), "%s%s", home, NS_STATE_DIR_USER_SUFFIX);
+        if (n > 0 && (size_t)n < sizeof(user_dir)) {
+            return user_dir;
+        }
+    }
+
+    return "run";
+}
 
 static const char *state_to_string(nk_container_state_t state) {
     switch (state) {
@@ -46,7 +118,8 @@ static nk_execution_mode_t string_to_mode(const char *str) {
 
 static char *get_container_state_path(const char *container_id) {
     char *path = NULL;
-    if (asprintf(&path, "%s/%s/%s", NK_STATE_DIR, container_id, STATE_FILE) == -1) {
+    const char *state_dir = get_state_dir();
+    if (asprintf(&path, "%s/%s/%s", state_dir, container_id, STATE_FILE) == -1) {
         return NULL;
     }
     return path;
@@ -54,32 +127,66 @@ static char *get_container_state_path(const char *container_id) {
 
 static char *get_container_dir(const char *container_id) {
     char *path = NULL;
-    if (asprintf(&path, "%s/%s", NK_STATE_DIR, container_id) == -1) {
+    const char *state_dir = get_state_dir();
+    if (asprintf(&path, "%s/%s", state_dir, container_id) == -1) {
         return NULL;
     }
     return path;
 }
 
 static int ensure_container_dir(const char *container_id) {
-    char *dir = get_container_dir(container_id);
-    if (!dir) {
+    nk_stderr( "[ENSURE_DIR] Starting for container '%s'\n", container_id);
+    fflush(stderr);
+
+    const char *state_dir = get_state_dir();
+    if (mkdir_p(state_dir, 0755) == -1) {
+        nk_stderr( "[ENSURE_DIR] ERROR: Failed to create state dir %s: %s\n",
+                state_dir, strerror(errno));
+        fflush(stderr);
         return -1;
     }
+
+    char *dir = get_container_dir(container_id);
+    if (!dir) {
+        nk_stderr( "[ENSURE_DIR] ERROR: Failed to get directory path\n");
+        fflush(stderr);
+        return -1;
+    }
+    nk_stderr( "[ENSURE_DIR] Directory path: %s\n", dir);
+    fflush(stderr);
 
     struct stat st;
     int ret = 0;
 
+    nk_stderr( "[ENSURE_DIR] Checking if directory exists\n");
+    fflush(stderr);
     if (stat(dir, &st) == 0) {
+        nk_stderr( "[ENSURE_DIR] Path exists\n");
+        fflush(stderr);
         if (!S_ISDIR(st.st_mode)) {
-            fprintf(stderr, "Error: %s exists but is not a directory\n", dir);
+            nk_stderr( "[ENSURE_DIR] ERROR: Path exists but is not a directory\n");
+            fflush(stderr);
             ret = -1;
+        } else {
+            nk_stderr( "[ENSURE_DIR] Directory exists, OK\n");
+            fflush(stderr);
         }
-    } else if (mkdir(dir, 0755) == -1) {
-        fprintf(stderr, "Error: Failed to create directory %s: %s\n",
-                dir, strerror(errno));
-        ret = -1;
+    } else {
+        nk_stderr( "[ENSURE_DIR] Directory does not exist, creating\n");
+        fflush(stderr);
+        if (mkdir(dir, 0755) == -1) {
+            nk_stderr( "[ENSURE_DIR] ERROR: Failed to create directory: %s\n",
+                    strerror(errno));
+            fflush(stderr);
+            ret = -1;
+        } else {
+            nk_stderr( "[ENSURE_DIR] Directory created successfully\n");
+            fflush(stderr);
+        }
     }
 
+    nk_stderr( "[ENSURE_DIR] Complete, returning %d\n", ret);
+    fflush(stderr);
     free(dir);
     return ret;
 }
@@ -88,49 +195,91 @@ static int ensure_container_dir(const char *container_id) {
  * nk_state_save - Save container state to disk
  */
 int nk_state_save(const nk_container_t *container) {
+    nk_stderr( "[STATE_SAVE] Starting state save for container '%s'\n",
+            container ? container->id : "(null)");
+    fflush(stderr);
+
     if (!container || !container->id) {
+        nk_stderr( "[STATE_SAVE] ERROR: Invalid container\n");
+        fflush(stderr);
         return -1;
     }
 
+    nk_stderr( "[STATE_SAVE] Ensuring container directory exists\n");
+    fflush(stderr);
     if (ensure_container_dir(container->id) == -1) {
+        nk_stderr( "[STATE_SAVE] ERROR: Failed to create container directory\n");
+        fflush(stderr);
         return -1;
     }
+    nk_stderr( "[STATE_SAVE] Container directory OK\n");
+    fflush(stderr);
 
+    nk_stderr( "[STATE_SAVE] Getting state path\n");
+    fflush(stderr);
     char *state_path = get_container_state_path(container->id);
     if (!state_path) {
+        nk_stderr( "[STATE_SAVE] ERROR: Failed to get state path\n");
+        fflush(stderr);
         return -1;
     }
+    nk_stderr( "[STATE_SAVE] State path: %s\n", state_path);
+    fflush(stderr);
 
     /* Create JSON object */
+    nk_stderr( "[STATE_SAVE] Creating JSON object\n");
+    fflush(stderr);
     json_t *root = json_object();
     if (!root) {
+        nk_stderr( "[STATE_SAVE] ERROR: Failed to create JSON object\n");
+        fflush(stderr);
         free(state_path);
         return -1;
     }
+    nk_stderr( "[STATE_SAVE] JSON object created\n");
+    fflush(stderr);
 
+    nk_stderr( "[STATE_SAVE] Populating JSON fields\n");
+    fflush(stderr);
     json_object_set_new(root, "id", json_string(container->id));
     json_object_set_new(root, "bundle_path", json_string(container->bundle_path ? container->bundle_path : ""));
     json_object_set_new(root, "state", json_string(state_to_string(container->state)));
     json_object_set_new(root, "mode", json_string(mode_to_string(container->mode)));
     json_object_set_new(root, "pid", json_integer(container->init_pid));
+    nk_stderr( "[STATE_SAVE] JSON fields populated\n");
+    fflush(stderr);
 
     /* Write to file */
+    nk_stderr( "[STATE_SAVE] Opening file for writing: %s\n", state_path);
+    fflush(stderr);
     int ret = 0;
     FILE *f = fopen(state_path, "w");
     if (f) {
+        nk_stderr( "[STATE_SAVE] File opened, writing JSON\n");
+        fflush(stderr);
         if (json_dumpf(root, f, JSON_INDENT(2)) == -1) {
-            fprintf(stderr, "Error: Failed to write state file\n");
+            nk_stderr( "[STATE_SAVE] ERROR: Failed to write JSON to file\n");
+            fflush(stderr);
             ret = -1;
         }
+        nk_stderr( "[STATE_SAVE] JSON written, closing file\n");
+        fflush(stderr);
         fclose(f);
+        nk_stderr( "[STATE_SAVE] File closed\n");
+        fflush(stderr);
     } else {
-        fprintf(stderr, "Error: Failed to open state file for writing: %s\n",
+        nk_stderr( "[STATE_SAVE] ERROR: Failed to open file: %s\n",
                 strerror(errno));
+        fflush(stderr);
         ret = -1;
     }
 
+    nk_stderr( "[STATE_SAVE] Cleaning up\n");
+    fflush(stderr);
     json_decref(root);
     free(state_path);
+    nk_stderr( "[STATE_SAVE] State save complete, returning %d\n", ret);
+    fflush(stderr);
     return ret;
 }
 
@@ -150,7 +299,7 @@ nk_container_t *nk_state_load(const char *container_id) {
     /* Read JSON file */
     FILE *f = fopen(state_path, "r");
     if (!f) {
-        fprintf(stderr, "Error: Failed to open state file for reading: %s\n",
+        nk_stderr( "Error: Failed to open state file for reading: %s\n",
                 strerror(errno));
         free(state_path);
         return NULL;
@@ -162,7 +311,7 @@ nk_container_t *nk_state_load(const char *container_id) {
     free(state_path);
 
     if (!root) {
-        fprintf(stderr, "Error: Failed to parse state file: %s at line %d\n",
+        nk_stderr( "Error: Failed to parse state file: %s at line %d\n",
                 error.text, error.line);
         return NULL;
     }
@@ -221,7 +370,7 @@ int nk_state_delete(const char *container_id) {
 
     int ret = unlink(state_path);
     if (ret == -1 && errno != ENOENT) {
-        fprintf(stderr, "Error: Failed to delete state file: %s\n",
+        nk_stderr( "Error: Failed to delete state file: %s\n",
                 strerror(errno));
     }
 

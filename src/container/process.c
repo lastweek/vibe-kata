@@ -16,6 +16,7 @@
 #include <grp.h>
 
 #include "nk_container.h"
+#include "nk_log.h"
 
 /* Make cap-ng optional */
 #ifdef HAVE_LIBCAPNG
@@ -36,6 +37,9 @@ typedef struct {
     char **env;        /* Environment variables */
 } container_exec_ctx_t;
 
+#define CHILD_SYNC_READY '1'
+#define CHILD_SYNC_ERROR '0'
+
 /**
  * nk_process_drop_capabilities - Drop capabilities
  */
@@ -47,17 +51,17 @@ static int nk_process_drop_capabilities(void) {
 
     /* Clear all capabilities from the bounding set */
     if (capng_clear(CAPNG_SELECT_BOTH) == -1) {
-        fprintf(stderr, "Warning: Failed to clear capabilities\n");
+        nk_stderr( "Warning: Failed to clear capabilities\n");
         return -1;
     }
 
     if (capng_apply(CAPNG_SELECT_BOTH) == -1) {
-        fprintf(stderr, "Warning: Failed to apply capabilities\n");
+        nk_stderr( "Warning: Failed to apply capabilities\n");
         return -1;
     }
 #else
     /* libcap-ng not available, skip capability dropping */
-    fprintf(stderr, "Warning: libcap-ng not available, skipping capability dropping\n");
+    nk_stderr( "Warning: libcap-ng not available, skipping capability dropping\n");
 #endif
     return 0;
 }
@@ -73,7 +77,7 @@ static int nk_process_set_rlimits(void) {
     };
 
     if (setrlimit(RLIMIT_STACK, &rl) == -1) {
-        fprintf(stderr, "Warning: Failed to set stack limit: %s\n",
+        nk_stderr( "Warning: Failed to set stack limit: %s\n",
                 strerror(errno));
     }
 
@@ -86,13 +90,13 @@ static int nk_process_set_rlimits(void) {
 __attribute__((unused))
 static int nk_process_set_uid_gid(uid_t uid, gid_t gid) {
     if (setgid(gid) == -1) {
-        fprintf(stderr, "Error: Failed to set GID %d: %s\n",
+        nk_stderr( "Error: Failed to set GID %d: %s\n",
                 (int)gid, strerror(errno));
         return -1;
     }
 
     if (setuid(uid) == -1) {
-        fprintf(stderr, "Error: Failed to set UID %d: %s\n",
+        nk_stderr( "Error: Failed to set UID %d: %s\n",
                 (int)uid, strerror(errno));
         return -1;
     }
@@ -106,6 +110,9 @@ static int nk_process_set_uid_gid(uid_t uid, gid_t gid) {
 static int container_child_fn(void *arg) {
     container_exec_ctx_t *exec_ctx = (container_exec_ctx_t *)arg;
     const nk_container_ctx_t *ctx = exec_ctx->ctx;
+    nk_log_set_role(NK_LOG_ROLE_CHILD);
+
+    nk_log_debug("Child process started (in isolated namespaces)");
 
     /* Close parent end of sync pipe */
     close(exec_ctx->sync_pipe[0]);
@@ -114,6 +121,7 @@ static int container_child_fn(void *arg) {
     if (exec_ctx->hostname && ctx->namespaces) {
         for (size_t i = 0; i < ctx->namespaces_len; i++) {
             if (ctx->namespaces[i].type == NK_NS_UTS) {
+                nk_log_debug("Setting hostname in UTS namespace");
                 nk_namespace_set_hostname(exec_ctx->hostname);
                 break;
             }
@@ -121,18 +129,19 @@ static int container_child_fn(void *arg) {
     }
 
     /* Setup root filesystem */
+    nk_log_debug("Setting up root filesystem");
     if (nk_container_setup_rootfs(ctx) == -1) {
-        const char *error = "Failed to setup rootfs";
-        write(exec_ctx->sync_pipe[1], error, strlen(error));
+        const char status = CHILD_SYNC_ERROR;
+        (void)write(exec_ctx->sync_pipe[1], &status, 1);
         close(exec_ctx->sync_pipe[1]);
         return 1;
     }
+    nk_log_debug("Root filesystem ready");
 
     /* Change to working directory */
     if (ctx->cwd) {
         if (chdir(ctx->cwd) == -1) {
-            fprintf(stderr, "Warning: Failed to chdir to %s: %s\n",
-                    ctx->cwd, strerror(errno));
+            nk_log_warn("Failed to chdir to %s: %s", ctx->cwd, strerror(errno));
             /* Try root instead */
             chdir("/");
         }
@@ -142,24 +151,32 @@ static int container_child_fn(void *arg) {
     /* For now, run as root - Phase 2 enhancement */
 
     /* Drop capabilities */
+    nk_log_debug("Dropping capabilities");
     nk_process_drop_capabilities();
 
     /* Set resource limits */
     nk_process_set_rlimits();
 
     /* Notify parent we're ready */
-    const char ready = '1';
+    nk_log_debug("Notifying parent: ready to exec");
+    const char ready = CHILD_SYNC_READY;
     (void)write(exec_ctx->sync_pipe[1], &ready, 1);
     close(exec_ctx->sync_pipe[1]);
 
     /* Execute the container process */
+    nk_log_debug("Executing: %s", ctx->args[0]);
     if (ctx->args && ctx->args_len > 0) {
         execve(ctx->args[0], ctx->args, exec_ctx->env);
     }
 
     /* If we get here, exec failed */
-    fprintf(stderr, "Error: Failed to execute %s: %s\n",
+    nk_log_error("Failed to execute %s: %s",
             ctx->args ? ctx->args[0] : "none", strerror(errno));
+    if (errno == ENOEXEC) {
+        nk_stderr("Hint: executable format is incompatible with host CPU architecture.\n");
+        nk_stderr("Hint: rebuild rootfs for this host, then reinstall bundle:\n");
+        nk_stderr("      ./scripts/setup-rootfs.sh --force && make install\n");
+    }
     return 1;
 }
 
@@ -168,7 +185,7 @@ static int container_child_fn(void *arg) {
  */
 pid_t nk_container_exec(const nk_container_ctx_t *ctx) {
     if (!ctx || !ctx->rootfs || !ctx->args || ctx->args_len == 0) {
-        fprintf(stderr, "Error: Invalid container context\n");
+        nk_log_error("Invalid container context");
         return -1;
     }
 
@@ -178,24 +195,37 @@ pid_t nk_container_exec(const nk_container_ctx_t *ctx) {
         clone_flags |= nk_namespace_get_clone_flags(ctx->namespaces, ctx->namespaces_len);
     }
 
-    printf("  Clone flags: %s\n", nk_namespace_flags_to_string(clone_flags));
+    nk_log_debug("Clone flags: %s (0x%x)", nk_namespace_flags_to_string(clone_flags), clone_flags);
+    nk_log_info("Clone flags: %s", nk_namespace_flags_to_string(clone_flags));
+
+    if (nk_log_educational) {
+        nk_log_explain_op("Allocating stack for child process",
+            "clone() requires separate stack. Unlike fork(), clone can create threads with shared memory.");
+    }
 
     /* Create stack for child process */
     char *stack = malloc(STACK_SIZE);
     if (!stack) {
-        fprintf(stderr, "Error: Failed to allocate stack\n");
+        nk_log_error("Failed to allocate stack");
         return -1;
     }
     char *stack_top = stack + STACK_SIZE;
+    nk_log_debug("Allocated %d byte stack at %p", STACK_SIZE, stack);
 
     /* Create sync pipe for parent-child coordination */
+    if (nk_log_educational) {
+        nk_log_explain_op("Creating sync pipe",
+            "Parent waits on pipe while child sets up namespaces, rootfs, etc. "
+            "Ensures parent knows when child is ready before continuing.");
+    }
+
     int sync_pipe[2];
     if (pipe(sync_pipe) == -1) {
-        fprintf(stderr, "Error: Failed to create sync pipe: %s\n",
-                strerror(errno));
+        nk_log_error("Failed to create sync pipe: %s", strerror(errno));
         free(stack);
         return -1;
     }
+    nk_log_debug("Sync pipe created: fd[%d, %d]", sync_pipe[0], sync_pipe[1]);
 
     /* Setup execution context */
     container_exec_ctx_t exec_ctx = {
@@ -220,9 +250,10 @@ pid_t nk_container_exec(const nk_container_ctx_t *ctx) {
     }
 
     /* Clone child process */
+    nk_log_set_role(NK_LOG_ROLE_PARENT);
     pid_t pid = clone(container_child_fn, stack_top, clone_flags, &exec_ctx);
     if (pid == -1) {
-        fprintf(stderr, "Error: Failed to clone container process: %s\n",
+        nk_stderr( "Error: Failed to clone container process: %s\n",
                 strerror(errno));
         close(sync_pipe[0]);
         close(sync_pipe[1]);
@@ -236,9 +267,10 @@ pid_t nk_container_exec(const nk_container_ctx_t *ctx) {
     /* Wait for child to signal ready */
     char buf;
     ssize_t ret = read(sync_pipe[0], &buf, 1);
-    if (ret <= 0) {
-        fprintf(stderr, "Error: Child process failed to initialize\n");
+    if (ret <= 0 || buf != CHILD_SYNC_READY) {
+        nk_stderr( "Error: Child process failed to initialize\n");
         close(sync_pipe[0]);
+        (void)waitpid(pid, NULL, 0);
         free(stack);
         return -1;
     }
@@ -258,7 +290,7 @@ pid_t nk_container_exec(const nk_container_ctx_t *ctx) {
  */
 int nk_container_wait(pid_t pid, int *status) {
     if (waitpid(pid, status, 0) == -1) {
-        fprintf(stderr, "Error: Failed to wait for container: %s\n",
+        nk_stderr( "Error: Failed to wait for container: %s\n",
                 strerror(errno));
         return -1;
     }
@@ -270,7 +302,7 @@ int nk_container_wait(pid_t pid, int *status) {
  */
 int nk_container_signal(pid_t pid, int sig) {
     if (kill(pid, sig) == -1) {
-        fprintf(stderr, "Error: Failed to send signal %d to PID %d: %s\n",
+        nk_stderr( "Error: Failed to send signal %d to PID %d: %s\n",
                 sig, (int)pid, strerror(errno));
         return -1;
     }

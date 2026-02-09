@@ -1,41 +1,106 @@
-# Scripts Directory
+# Scripts Guide
 
-This directory contains helper scripts for nano-kata development and testing.
+This directory contains the supported build/test entrypoints.
 
-## setup-rootfs.sh
+Build artifacts are placed under `build/` by the Makefile.
 
-Downloads and sets up an Alpine Linux mini rootfs for testing containers.
+## Primary Commands
 
-**Usage:**
+### `./scripts/build.sh`
+
+Build the project locally.
+
+```bash
+./scripts/build.sh
+./scripts/build.sh --clean
+./scripts/build.sh --install
+./scripts/build.sh --mode release
+./scripts/build.sh --sanitize address
+./scripts/build.sh --mode debug --sanitize undefined -j 8
+```
+
+Useful Make targets behind this script:
+
+```bash
+make check-deps
+make clean
+make distclean
+make release
+make asan
+```
+
+### `./scripts/test.sh`
+
+Run test suites against the installed runtime (`/usr/local/bin/ns-runtime`).
+
+```bash
+./scripts/test.sh
+./scripts/test.sh smoke
+./scripts/test.sh integration
+./scripts/test.sh perf
+```
+
+### `./scripts/bench.sh`
+
+Run performance benchmarks.
+
+```bash
+./scripts/bench.sh
+./scripts/bench.sh micro
+./scripts/bench.sh latency
+./scripts/bench.sh throughput
+```
+
+### `./scripts/setup-rootfs.sh`
+
+Download Alpine rootfs into `tests/bundle/rootfs`.
+
 ```bash
 ./scripts/setup-rootfs.sh
+./scripts/setup-rootfs.sh --force
 ```
 
-**What it does:**
-- Downloads Alpine mini rootfs (~5MB)
-- Extracts to `tests/bundle/rootfs/`
-- Creates essential device directories
-- Sets up minimal inittab
+Notes:
+- Architecture is auto-detected from host (`uname -m`)
+- Override explicitly with `ALPINE_ARCH=<arch> ./scripts/setup-rootfs.sh --force`
 
-**Why Alpine?**
-- Tiny: Only ~5MB uncompressed
-- Practical: Real Linux distribution used in production
-- Complete: Includes package manager (`apk`) for adding tools
-- Educational: Industry standard for minimal containers
+### `./scripts/vm-sync-test.sh`
 
-**After running this:**
+Recommended for macOS + Ubuntu VM workflow: sync source to VM-native path, build, then run tests there.
+
 ```bash
-./bin/nk-runtime create --bundle=./tests/bundle alpine
-./bin/nk-runtime start alpine
+./scripts/vm-sync-test.sh integration
+./scripts/vm-sync-test.sh smoke
 ```
 
-**Clean up:**
+Defaults:
+- `VM_USER=ys`
+- `VM_HOST=127.0.0.1`
+- `VM_PORT=2222`
+- `VM_PASS=root`
+- `VM_REMOTE_DIR=/home/ys/vibe-sandbox-vm`
+- Requires `expect` (for password-based SSH automation)
+
+### `./scripts/ecs-sync-test.sh`
+
+Recommended for key-based remote build/test on ECS servers.
+
 ```bash
-rm -rf tests/bundle/rootfs
+./scripts/ecs-sync-test.sh integration
+./scripts/ecs-sync-test.sh smoke
+./scripts/ecs-sync-test.sh --bootstrap integration
 ```
 
-## Other Scripts (Development)
+Defaults:
+- `ECS_USER=root`
+- `ECS_HOST=118.196.47.98`
+- `ECS_PORT=22`
+- `ECS_KEY=~/.ssh/id_rsa`
+- `ECS_REMOTE_DIR=/root/vibe-sandbox`
 
-- `build-and-test.sh` - Build and run tests (requires Linux)
-- `build-simple.exp` - Build via SSH to Linux environment
-- `test-*.exp` - Various test scripts
+## Internal Shared Helpers
+
+- `scripts/lib/common.sh` centralizes shared checks and path defaults for build/test scripts.
+- `scripts/perf/common.sh` centralizes perf benchmark helpers.
+- `scripts/suites/` contains smoke/integration suite scripts.
+- `scripts/perf/` contains direct benchmark scripts.

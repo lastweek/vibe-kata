@@ -20,7 +20,7 @@
     "path": "rootfs",
     "readonly": false
   },
-  "hostname": "nano-kata",
+  "hostname": "nano-sandbox",
   "mounts": [
     {
       "destination": "/proc",

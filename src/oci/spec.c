@@ -7,13 +7,29 @@
 #include <limits.h>
 
 #include "nk_oci.h"
+#include "nk_log.h"
 
 #define CONFIG_JSON "config.json"
 
 static char *load_json_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) {
-        fprintf(stderr, "Error: Failed to open %s: %s\n", path, strerror(errno));
+        if (errno == ENOENT) {
+            nk_stderr( "Error: Cannot find OCI spec file at: %s\n", path);
+            nk_stderr( "\n");
+            nk_stderr( "A container bundle must contain a config.json file.\n");
+            nk_stderr( "\n");
+            nk_stderr( "Usage: ns-runtime create --bundle=<bundle-path> <container-id>\n");
+            nk_stderr( "\n");
+            nk_stderr( "Example bundle locations:\n");
+            nk_stderr( "  --bundle=./tests/bundle    (use the test bundle)\n");
+            nk_stderr( "  --bundle=.                 (current directory must have config.json)\n");
+            nk_stderr( "\n");
+            nk_stderr( "To setup a test bundle:\n");
+            nk_stderr( "  ./scripts/setup-rootfs.sh\n");
+        } else {
+            nk_stderr( "Error: Failed to open %s: %s\n", path, strerror(errno));
+        }
         return NULL;
     }
 
@@ -25,7 +41,7 @@ static char *load_json_file(const char *path) {
     /* Read entire file */
     char *content = malloc(size + 1);
     if (!content) {
-        fprintf(stderr, "Error: Failed to allocate memory for config\n");
+        nk_stderr( "Error: Failed to allocate memory for config\n");
         fclose(f);
         return NULL;
     }
@@ -67,7 +83,7 @@ static nk_oci_process_t *parse_process(json_t *proc_obj) {
     /* Parse args (required) */
     json_t *args = json_object_get(proc_obj, "args");
     if (!args || !json_is_array(args)) {
-        fprintf(stderr, "Error: Process args is required\n");
+        nk_stderr( "Error: Process args is required\n");
         free(proc);
         return NULL;
     }
@@ -129,7 +145,7 @@ static nk_oci_root_t *parse_root(json_t *root_obj) {
     /* Parse path (required) */
     json_t *path = json_object_get(root_obj, "path");
     if (!path || !json_is_string(path)) {
-        fprintf(stderr, "Error: Root path is required\n");
+        nk_stderr( "Error: Root path is required\n");
         free(root);
         return NULL;
     }
@@ -187,6 +203,35 @@ nk_oci_spec_t *nk_oci_spec_load(const char *bundle_path) {
     char config_path[PATH_MAX];
     snprintf(config_path, sizeof(config_path), "%s/%s", bundle_path, CONFIG_JSON);
 
+    /* Check if bundle directory exists */
+    struct stat st;
+    if (stat(bundle_path, &st) != 0) {
+        if (errno == ENOENT) {
+            nk_stderr( "Error: Bundle directory does not exist: %s\n", bundle_path);
+            nk_stderr( "\n");
+            nk_stderr( "A bundle is a directory containing:\n");
+            nk_stderr( "  config.json    - OCI container specification\n");
+            nk_stderr( "  rootfs/        - Container root filesystem\n");
+            nk_stderr( "\n");
+            nk_stderr( "Usage: ns-runtime create --bundle=<bundle-path> <container-id>\n");
+            nk_stderr( "\n");
+            nk_stderr( "Example:\n");
+            nk_stderr( "  ns-runtime create --bundle=./tests/bundle my-container\n");
+            nk_stderr( "\n");
+            nk_stderr( "To setup a test bundle:\n");
+            nk_stderr( "  ./scripts/setup-rootfs.sh\n");
+        } else {
+            nk_stderr( "Error: Cannot access bundle directory %s: %s\n",
+                    bundle_path, strerror(errno));
+        }
+        return NULL;
+    }
+
+    if (!S_ISDIR(st.st_mode)) {
+        nk_stderr( "Error: Bundle path is not a directory: %s\n", bundle_path);
+        return NULL;
+    }
+
     /* Load and parse JSON */
     char *json_content = load_json_file(config_path);
     if (!json_content) {
@@ -198,7 +243,7 @@ nk_oci_spec_t *nk_oci_spec_load(const char *bundle_path) {
     free(json_content);
 
     if (!root) {
-        fprintf(stderr, "Error: Failed to parse config.json: %s at line %d\n",
+        nk_stderr( "Error: Failed to parse config.json: %s at line %d\n",
                 error.text, error.line);
         return NULL;
     }
@@ -370,22 +415,52 @@ void nk_oci_spec_free(nk_oci_spec_t *spec) {
 
 bool nk_oci_spec_validate(const nk_oci_spec_t *spec) {
     if (!spec) {
-        fprintf(stderr, "Error: Spec is NULL\n");
+        nk_stderr( "Error: OCI spec is NULL\n");
         return false;
     }
 
     if (!spec->root || !spec->root->path) {
-        fprintf(stderr, "Error: Root path is required\n");
+        nk_stderr( "Error: config.json is missing 'root.path' field\n");
+        nk_stderr( "\n");
+        nk_stderr( "Your config.json must specify the root filesystem path:\n");
+        nk_stderr( "\n");
+        nk_stderr( "  {\n");
+        nk_stderr( "    \"root\": {\n");
+        nk_stderr( "      \"path\": \"rootfs\",\n");
+        nk_stderr( "      \"readonly\": true\n");
+        nk_stderr( "    },\n");
+        nk_stderr( "    ...\n");
+        nk_stderr( "  }\n");
         return false;
     }
 
     if (!spec->process) {
-        fprintf(stderr, "Error: Process configuration is required\n");
+        nk_stderr( "Error: config.json is missing 'process' field\n");
+        nk_stderr( "\n");
+        nk_stderr( "Your config.json must specify the process to run:\n");
+        nk_stderr( "\n");
+        nk_stderr( "  {\n");
+        nk_stderr( "    \"process\": {\n");
+        nk_stderr( "      \"args\": [\"/bin/sh\"],\n");
+        nk_stderr( "      \"cwd\": \"/\",\n");
+        nk_stderr( "      ...\n");
+        nk_stderr( "    },\n");
+        nk_stderr( "    ...\n");
+        nk_stderr( "  }\n");
         return false;
     }
 
     if (!spec->process->args || spec->process->args_len == 0) {
-        fprintf(stderr, "Error: Process args are required\n");
+        nk_stderr( "Error: config.json 'process.args' is empty\n");
+        nk_stderr( "\n");
+        nk_stderr( "Your config.json must specify the command to run:\n");
+        nk_stderr( "\n");
+        nk_stderr( "  {\n");
+        nk_stderr( "    \"process\": {\n");
+        nk_stderr( "      \"args\": [\"/bin/sh\"],  // <-- This is required\n");
+        nk_stderr( "      ...\n");
+        nk_stderr( "    }\n");
+        nk_stderr( "  }\n");
         return false;
     }
 

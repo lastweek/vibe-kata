@@ -10,6 +10,7 @@
 #include <limits.h>
 
 #include "nk_container.h"
+#include "nk_log.h"
 
 #define CGROUP_ROOT "/sys/fs/cgroup"
 #define CGROUP_V2_CHECK "/sys/fs/cgroup/cgroup.controllers"
@@ -27,22 +28,22 @@ static int nk_cgroup_is_v2(void) {
  */
 static int nk_cgroup_create(const char *container_id) {
     char cgroup_path[PATH_MAX];
-    snprintf(cgroup_path, sizeof(cgroup_path), "%s/nano-kata/%s",
+    snprintf(cgroup_path, sizeof(cgroup_path), "%s/nano-sandbox/%s",
              CGROUP_ROOT, container_id);
 
     /* Create parent cgroup directory */
     char parent_dir[PATH_MAX];
-    snprintf(parent_dir, sizeof(parent_dir), "%s/nano-kata", CGROUP_ROOT);
+    snprintf(parent_dir, sizeof(parent_dir), "%s/nano-sandbox", CGROUP_ROOT);
 
     if (mkdir(parent_dir, 0755) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Error: Failed to create %s: %s\n",
+        nk_stderr( "Error: Failed to create %s: %s\n",
                 parent_dir, strerror(errno));
         return -1;
     }
 
     /* Create container cgroup directory */
     if (mkdir(cgroup_path, 0755) == -1 && errno != EEXIST) {
-        fprintf(stderr, "Error: Failed to create %s: %s\n",
+        nk_stderr( "Error: Failed to create %s: %s\n",
                 cgroup_path, strerror(errno));
         return -1;
     }
@@ -60,7 +61,7 @@ static int nk_cgroup_create(const char *container_id) {
         close(fd);
     }
 
-    printf("  Created cgroup: %s\n", cgroup_path);
+    nk_log_info("Created cgroup: %s", cgroup_path);
     return 0;
 }
 
@@ -73,12 +74,12 @@ static int nk_cgroup_set_memory_limit(const char *container_id, uint64_t limit) 
     }
 
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/nano-kata/%s/memory.max",
+    snprintf(path, sizeof(path), "%s/nano-sandbox/%s/memory.max",
              CGROUP_ROOT, container_id);
 
     int fd = open(path, O_WRONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error: Failed to open %s: %s\n",
+        nk_stderr( "Error: Failed to open %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -87,14 +88,14 @@ static int nk_cgroup_set_memory_limit(const char *container_id, uint64_t limit) 
     snprintf(limit_str, sizeof(limit_str), "%lu", limit);
 
     if (write(fd, limit_str, strlen(limit_str)) == -1) {
-        fprintf(stderr, "Warning: Failed to set memory limit: %s\n",
+        nk_stderr( "Warning: Failed to set memory limit: %s\n",
                 strerror(errno));
         close(fd);
         return -1;
     }
 
     close(fd);
-    printf("  Set memory limit: %lu bytes\n", limit);
+    nk_log_info("Set memory limit: %lu bytes", limit);
     return 0;
 }
 
@@ -107,12 +108,12 @@ static int nk_cgroup_set_cpu_shares(const char *container_id, uint64_t shares) {
     }
 
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/nano-kata/%s/cpu.weight",
+    snprintf(path, sizeof(path), "%s/nano-sandbox/%s/cpu.weight",
              CGROUP_ROOT, container_id);
 
     int fd = open(path, O_WRONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error: Failed to open %s: %s\n",
+        nk_stderr( "Error: Failed to open %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -121,14 +122,14 @@ static int nk_cgroup_set_cpu_shares(const char *container_id, uint64_t shares) {
     snprintf(shares_str, sizeof(shares_str), "%lu", shares);
 
     if (write(fd, shares_str, strlen(shares_str)) == -1) {
-        fprintf(stderr, "Warning: Failed to set CPU shares: %s\n",
+        nk_stderr( "Warning: Failed to set CPU shares: %s\n",
                 strerror(errno));
         close(fd);
         return -1;
     }
 
     close(fd);
-    printf("  Set CPU weight: %lu\n", shares);
+    nk_log_info("Set CPU weight: %lu", shares);
     return 0;
 }
 
@@ -141,12 +142,12 @@ static int nk_cgroup_set_pids_limit(const char *container_id, uint64_t limit) {
     }
 
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/nano-kata/%s/pids.max",
+    snprintf(path, sizeof(path), "%s/nano-sandbox/%s/pids.max",
              CGROUP_ROOT, container_id);
 
     int fd = open(path, O_WRONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error: Failed to open %s: %s\n",
+        nk_stderr( "Error: Failed to open %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -155,14 +156,14 @@ static int nk_cgroup_set_pids_limit(const char *container_id, uint64_t limit) {
     snprintf(limit_str, sizeof(limit_str), "%lu", limit);
 
     if (write(fd, limit_str, strlen(limit_str)) == -1) {
-        fprintf(stderr, "Warning: Failed to set PIDs limit: %s\n",
+        nk_stderr( "Warning: Failed to set PIDs limit: %s\n",
                 strerror(errno));
         close(fd);
         return -1;
     }
 
     close(fd);
-    printf("  Set PIDs limit: %lu\n", limit);
+    nk_log_info("Set PIDs limit: %lu", limit);
     return 0;
 }
 
@@ -171,12 +172,12 @@ static int nk_cgroup_set_pids_limit(const char *container_id, uint64_t limit) {
  */
 static int nk_cgroup_add_process(const char *container_id, pid_t pid) {
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/nano-kata/%s/cgroup.procs",
+    snprintf(path, sizeof(path), "%s/nano-sandbox/%s/cgroup.procs",
              CGROUP_ROOT, container_id);
 
     int fd = open(path, O_WRONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error: Failed to open %s: %s\n",
+        nk_stderr( "Error: Failed to open %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
@@ -185,7 +186,7 @@ static int nk_cgroup_add_process(const char *container_id, pid_t pid) {
     snprintf(pid_str, sizeof(pid_str), "%d", pid);
 
     if (write(fd, pid_str, strlen(pid_str)) == -1) {
-        fprintf(stderr, "Error: Failed to add process to cgroup: %s\n",
+        nk_stderr( "Error: Failed to add process to cgroup: %s\n",
                 strerror(errno));
         close(fd);
         return -1;
@@ -200,7 +201,7 @@ static int nk_cgroup_add_process(const char *container_id, pid_t pid) {
  */
 static int nk_cgroup_delete(const char *container_id) {
     char cgroup_path[PATH_MAX];
-    int len = snprintf(cgroup_path, sizeof(cgroup_path), "%s/nano-kata",
+    int len = snprintf(cgroup_path, sizeof(cgroup_path), "%s/nano-sandbox",
                        CGROUP_ROOT);
     if (len > 0 && len < (int)sizeof(cgroup_path)) {
         snprintf(cgroup_path + len, sizeof(cgroup_path) - len, "/%s", container_id);
@@ -220,7 +221,7 @@ static int nk_cgroup_delete(const char *container_id) {
 
     /* Remove cgroup directory */
     if (rmdir(cgroup_path) == -1 && errno != ENOENT) {
-        fprintf(stderr, "Warning: Failed to remove cgroup %s: %s\n",
+        nk_stderr( "Warning: Failed to remove cgroup %s: %s\n",
                 cgroup_path, strerror(errno));
     }
 
@@ -238,11 +239,11 @@ int nk_container_setup_cgroups(const nk_container_ctx_t *ctx,
 
     /* Check if cgroups v2 is available */
     if (!nk_cgroup_is_v2()) {
-        fprintf(stderr, "Warning: cgroups v2 not available, skipping cgroup setup\n");
+        nk_stderr( "Warning: cgroups v2 not available, skipping cgroup setup\n");
         return 0;
     }
 
-    printf("  Setting up cgroups...\n");
+    nk_log_info("Setting up cgroups");
 
     /* Create cgroup */
     if (nk_cgroup_create(container_id) == -1) {

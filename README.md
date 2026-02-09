@@ -1,4 +1,4 @@
-# nano-kata: Educational OCI Container Runtime
+# nano-sandbox: Educational OCI Container Runtime
 
 A minimal OCI-compatible container runtime written in C, supporting both pure container and VM-based execution via Firecracker.
 
@@ -9,9 +9,9 @@ A minimal OCI-compatible container runtime written in C, supporting both pure co
 #### Phase 1: Foundation & OCI Spec Handling
 - [x] Project structure and build system (Makefile)
 - [x] Main header files defining core data structures
-- [x] Command-line interface with create/start/delete/state commands
+- [x] Command-line interface with create/start/run/delete/state commands
 - [x] OCI spec parser (config.json with jansson)
-- [x] Container state persistence (JSON files in /run/nano-kata)
+- [x] Container state persistence (JSON files in /run/nano-sandbox)
 - [x] Basic integration tests
 
 ## Building
@@ -25,68 +25,151 @@ sudo apt-get install gcc make libjansson-dev
 brew install jansson
 ```
 
-### Compile
+### Build and Install
+
 ```bash
-make
+# Check toolchain + headers
+make check-deps
+
+# Build and install system-wide (default prefix: /usr/local)
+sudo make install
+
+# If you're on an SSHFS/shared mount where sudo cannot read source files:
+make install-system
+
+# This installs:
+#   /usr/local/bin/ns-runtime           (binary)
+#   /usr/local/share/nano-sandbox/bundle   (test bundle)
 ```
 
-This produces `bin/nk-runtime` binary.
+### Build Only
+
+```bash
+# Build without installing
+make
+
+# Release profile
+make release
+
+# Sanitizer profile
+make asan
+
+# This produces: ./build/bin/ns-runtime
+```
+
+### Packaging-Friendly Install
+
+```bash
+# Stage install into a package root
+make install DESTDIR=/tmp/pkgroot PREFIX=/usr
+
+# SSHFS-safe staged system install to /usr/local
+make install-system
+```
+
+### Cleanup
+
+```bash
+# Remove only compiled artifacts
+make clean
+
+# Remove build + local runtime/test artifacts
+make distclean
+```
 
 ## Usage Examples
 
-### Basic Commands
+### Quick Start (Installed Binary)
+
+```bash
+# After running 'make install', you can use the installed binary
+/usr/local/bin/ns-runtime create --bundle=/usr/local/share/nano-sandbox/bundle test1
+/usr/local/bin/ns-runtime start test1
+/usr/local/bin/ns-runtime run --bundle=/usr/local/share/nano-sandbox/bundle test2
+/usr/local/bin/ns-runtime state test1
+/usr/local/bin/ns-runtime delete test1
+```
+
+### Using Build Directory Binary
 
 ```bash
 # Show help
-./bin/nk-runtime --help
+./build/bin/ns-runtime --help
 
 # Show version
-./bin/nk-runtime --version
+./build/bin/ns-runtime --version
 
 # Create a container
-./bin/nk-runtime create --bundle=./tests/bundle mycontainer
+./build/bin/ns-runtime create --bundle=./tests/bundle mycontainer
 
 # Start a container
-./bin/nk-runtime start mycontainer
+./build/bin/ns-runtime start mycontainer
+
+# Run in one step (create + start, attached by default)
+./build/bin/ns-runtime run --bundle=./tests/bundle myrun
 
 # Query container state
-./bin/nk-runtime state mycontainer
+./build/bin/ns-runtime state mycontainer
 
 # Delete a container
-./bin/nk-runtime delete mycontainer
+./build/bin/ns-runtime delete mycontainer
 ```
 
-**Note**: Container state is stored in the local `run/` directory (no root required).
+**Note**: Container state is stored in the `run/` directory (or `~/.local/share/nano-sandbox/run/` for non-root runs, `/run/nano-sandbox` for root).
+
+Command behavior:
+- `start` defaults to detached mode (similar to `docker start`).
+- `run` defaults to attached mode (similar to `docker run`).
+- Use `-a/--attach` or `-d/--detach` to override.
+- Use `run --rm` to delete container metadata automatically after attached run exits.
 
 ### Testing
 
 ```bash
-# Run integration tests
-./tests/integration/test_basic.sh
+# Build and install
+sudo make install
+
+# Run all tests
+./scripts/test.sh
+
+# Run specific tests
+./scripts/test.sh smoke         # Smoke tests only
+./scripts/test.sh integration   # Integration tests only
+
+# Run benchmarks
+./scripts/bench.sh
 ```
 
 ## Project Structure
 
 ```
-nano-kata/
+nano-sandbox/
 ├── include/
 │   ├── nk.h                 # Main API and data structures
 │   ├── nk_oci.h             # OCI spec handling
 │   ├── nk_container.h       # Container operations (Phase 2)
+│   ├── nk_log.h             # Logging helpers and macros
 │   ├── nk_vm.h              # VM operations (Phase 3)
 │   └── common/state.h       # State management
 ├── src/
 │   ├── main.c               # CLI entry point
 │   ├── oci/
 │   │   └── spec.c           # OCI spec parser
+│   ├── container/           # Namespaces, mounts, cgroups, process
 │   └── common/
-│       └── state.c          # State persistence
+│       ├── state.c          # State persistence
+│       └── log.c            # Structured logging
+├── scripts/
+│   ├── build.sh             # Build helper
+│   ├── test.sh              # Smoke/integration/perf test entrypoint
+│   ├── bench.sh             # Benchmark entrypoint
+│   ├── vm-sync-test.sh      # macOS -> VM sync + remote test
+│   ├── suites/              # Smoke/integration suites
+│   └── perf/                # Perf benchmark scripts
 ├── tests/
 │   ├── bundle/
 │   │   ├── config.json      # OCI spec for testing
-│   │   └── rootfs/          # Container rootfs (empty for now)
-│   └── integration/
-│       └── test_basic.sh    # Basic integration tests
+│   │   └── rootfs/          # Container rootfs
 ├── Makefile
 └── README.md
 ```
@@ -126,25 +209,43 @@ nano-kata/
 
 ## Testing in Linux Environment
 
-To test on your Linux VM:
+Recommended workflow (edit on macOS, test in Ubuntu VM):
 
 ```bash
-# On Mac, copy files to Linux VM
-cd ~/ys/mac/vibe-kata
-rsync -avz -e "ssh -p 2222" . ys@localhost:~/ys/mac/vibe-kata/
+# From macOS project root, sync to VM + run build/tests remotely
+./scripts/vm-sync-test.sh integration
+# or: ./scripts/vm-sync-test.sh smoke
+```
 
-# Or manually in Linux VM:
-ssh -p 2222 ys@localhost
-cd ~/ys/mac/vibe-kata
+Default VM settings used by `vm-sync-test.sh`:
+- `VM_USER=ys`
+- `VM_HOST=127.0.0.1`
+- `VM_PORT=2222`
+- `VM_PASS=root`
+- `VM_REMOTE_DIR=/home/ys/vibe-sandbox-vm` (native VM path, not sshfs mount)
 
-# Install dependencies (if needed)
+You can still test manually via SSH:
+
+```bash
+ssh -p 2222 ys@127.0.0.1
+
+cd ~/vibe-sandbox-vm
 sudo apt-get install gcc make libjansson-dev
+./scripts/setup-rootfs.sh
+sudo make install
+./scripts/test.sh
+./scripts/bench.sh
+```
 
-# Build
-make clean && make
+All test scripts assume Linux and use the installed binary from `/usr/local/bin/` by default.
+Using the native VM directory avoids sshfs permission issues with `sudo` + container operations.
 
-# Run tests
-./tests/integration/test_basic.sh
+For ECS/remote server workflow (SSH key auth), use:
+
+```bash
+./scripts/ecs-sync-test.sh integration
+# or: ./scripts/ecs-sync-test.sh smoke
+# first-time deps: ./scripts/ecs-sync-test.sh --bootstrap integration
 ```
 
 ## Learning Outcomes (Phase 1)

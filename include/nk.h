@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* nano-kata version */
+/* nano-sandbox version */
 #define NK_VERSION_MAJOR 0
 #define NK_VERSION_MINOR 1
 #define NK_VERSION_PATCH 0
@@ -36,12 +36,14 @@ typedef struct nk_container {
 
 /* Command-line options */
 typedef struct nk_options {
-    char *command;                  /* create|start|delete|state */
+    char *command;                  /* create|start|run|delete|state */
     char *container_id;             /* Container ID */
     char *bundle_path;              /* Bundle path */
     char *pid_file;                 /* PID file path */
     nk_execution_mode_t mode;       /* Execution mode */
-    bool console;                   /* Attach to console */
+    bool attach;                    /* Attach to container process */
+    bool detach;                    /* Run detached from terminal */
+    bool rm;                        /* Remove container after run exits */
 } nk_options_t;
 
 /* Core API functions */
@@ -67,10 +69,20 @@ int nk_container_create(const nk_options_t *opts);
 /**
  * nk_container_start - Start a created container
  * @container_id: Container ID
+ * @attach: Wait for container process and mirror exit status
+ * @container_exit_code: Optional output for container exit code (attach mode)
  *
  * Returns: 0 on success, -1 on error
  */
-int nk_container_start(const char *container_id);
+int nk_container_start(const char *container_id, bool attach, int *container_exit_code);
+
+/**
+ * nk_container_run - Create and start container (docker-style run)
+ * @opts: Run options
+ *
+ * Returns: 0 on success, -1 on error
+ */
+int nk_container_run(const nk_options_t *opts);
 
 /**
  * nk_container_delete - Delete a container

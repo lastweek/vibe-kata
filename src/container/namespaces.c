@@ -14,6 +14,7 @@
 #include <limits.h>
 
 #include "nk_container.h"
+#include "nk_log.h"
 
 /* Namespace mapping */
 static const int ns_map[] = {
@@ -54,7 +55,7 @@ int nk_namespace_get_clone_flags(const nk_namespace_config_t *namespaces, size_t
  */
 int nk_namespace_set_hostname(const char *hostname) {
     if (sethostname(hostname, strlen(hostname)) == -1) {
-        fprintf(stderr, "Error: Failed to set hostname '%s': %s\n",
+        nk_stderr( "Error: Failed to set hostname '%s': %s\n",
                 hostname, strerror(errno));
         return -1;
     }
@@ -67,13 +68,13 @@ int nk_namespace_set_hostname(const char *hostname) {
 int nk_namespace_join(nk_namespace_type_t type, const char *path) {
     int fd = open(path, O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error: Failed to open namespace %s: %s\n",
+        nk_stderr( "Error: Failed to open namespace %s: %s\n",
                 path, strerror(errno));
         return -1;
     }
 
     if (setns(fd, ns_map[type]) == -1) {
-        fprintf(stderr, "Error: Failed to join namespace %s: %s\n",
+        nk_stderr( "Error: Failed to join namespace %s: %s\n",
                 ns_names[type], strerror(errno));
         close(fd);
         return -1;
@@ -91,13 +92,13 @@ static int nk_namespace_setup_user(uid_t uid, gid_t gid) {
     /* Write to uid_map */
     int uid_map = open("/proc/self/uid_map", O_WRONLY);
     if (uid_map == -1) {
-        fprintf(stderr, "Error: Failed to open uid_map: %s\n", strerror(errno));
+        nk_stderr( "Error: Failed to open uid_map: %s\n", strerror(errno));
         return -1;
     }
 
     /* Map container root to real root */
     if (dprintf(uid_map, "0 %d 1\n", uid) == -1) {
-        fprintf(stderr, "Error: Failed to write uid_map: %s\n", strerror(errno));
+        nk_stderr( "Error: Failed to write uid_map: %s\n", strerror(errno));
         close(uid_map);
         return -1;
     }
@@ -106,12 +107,12 @@ static int nk_namespace_setup_user(uid_t uid, gid_t gid) {
     /* Write to gid_map */
     int gid_map = open("/proc/self/gid_map", O_WRONLY);
     if (gid_map == -1) {
-        fprintf(stderr, "Error: Failed to open gid_map: %s\n", strerror(errno));
+        nk_stderr( "Error: Failed to open gid_map: %s\n", strerror(errno));
         return -1;
     }
 
     if (dprintf(gid_map, "0 %d 1\n", gid) == -1) {
-        fprintf(stderr, "Error: Failed to write gid_map: %s\n", strerror(errno));
+        nk_stderr( "Error: Failed to write gid_map: %s\n", strerror(errno));
         close(gid_map);
         return -1;
     }
@@ -132,7 +133,7 @@ static int nk_namespace_setup_user(uid_t uid, gid_t gid) {
  */
 int nk_container_setup_namespaces(const nk_container_ctx_t *ctx) {
     if (!ctx || !ctx->namespaces) {
-        fprintf(stderr, "Error: No namespace configuration provided\n");
+        nk_stderr( "Error: No namespace configuration provided\n");
         return -1;
     }
 
