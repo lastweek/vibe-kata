@@ -36,7 +36,8 @@ printf '✓ OCI config is present and valid\n'
 printf '\n[6/6] Checking rootfs...\n'
 [ -d "$NS_TEST_BUNDLE/rootfs/bin" ] || nk_die "rootfs missing: $NS_TEST_BUNDLE/rootfs/bin"
 BIN_COUNT="$(find "$NS_TEST_BUNDLE/rootfs/bin" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')"
-printf '✓ Root filesystem exists (%s binaries)\n' "$BIN_COUNT"
+nk_check_rootfs_exec_ready "$NS_TEST_BUNDLE/rootfs" || nk_die "rootfs is not executable on this host"
+printf '✓ Root filesystem exists and is executable (%s binaries)\n' "$BIN_COUNT"
 
 printf '\n=== Smoke Tests Passed ===\n'
 printf 'Ready for integration testing.\n'

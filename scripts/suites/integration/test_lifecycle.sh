@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Integration test suite for nano-sandbox
 # Tests full container lifecycle with validation
 # Features: fail-fast, timeouts, detailed logging
@@ -6,7 +6,11 @@
 # This script assumes it's running in a Linux environment and uses
 # the installed binary from /usr/local/bin/
 
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/common.sh
+source "$SCRIPT_DIR/../../lib/common.sh"
 
 # ============================================================================
 # Configuration
@@ -23,9 +27,18 @@ TEST_BUNDLE="/usr/local/share/nano-sandbox/bundle"
 export NS_RUN_DIR="${NS_RUN_DIR:-$HOME/.local/share/nano-sandbox/run}"
 mkdir -p "$NS_RUN_DIR"
 
+# Ensure sudo credentials are available once, then run non-interactively.
+if ! sudo -n true >/dev/null 2>&1; then
+    if [ -t 0 ]; then
+        sudo -v
+    else
+        echo "Error: sudo credentials are required. Run 'sudo -v' first." >&2
+        exit 1
+    fi
+fi
+
 # Sudo wrapper while preserving NS_RUN_DIR for runtime commands.
-# Keep "sudo" as the first token so run_with_timeout can apply "sudo timeout".
-SUDO="sudo NS_RUN_DIR=$NS_RUN_DIR"
+SUDO="sudo -n NS_RUN_DIR=$NS_RUN_DIR"
 
 # Timeouts (in seconds)
 TIMEOUT_CREATE=5
@@ -45,7 +58,7 @@ NC='\033[0m' # No Color
 
 TESTS_PASSED=0
 TESTS_FAILED=0
-TEST_SKIPPED=0
+TESTS_SKIPPED=0
 
 # ============================================================================
 # Test Framework
@@ -88,8 +101,17 @@ test_info() {
     echo -e "  ${BLUE}ℹ${NC} $1" >&2
 }
 
+contains_runtime_exec_error() {
+    local output="$1"
+    if echo "$output" | grep -Eq "Failed to execute .*:|Error: Child process failed to initialize"; then
+        return 0
+    fi
+    return 1
+}
+
 # Run command with timeout.
-# If command starts with sudo, run "sudo timeout ..." so timeout can kill children.
+# If command starts with sudo, run "timeout ... sudo ..." to avoid sudo implementations
+# that cannot execute timeout under a pseudo-tty.
 # Supports sudo env assignments (e.g., "sudo NS_RUN_DIR=... <cmd>").
 run_with_timeout() {
     local timeout_val="$1"
@@ -114,8 +136,8 @@ run_with_timeout() {
             esac
         done
 
-        test_info "Running: sudo ${sudo_args[*]} timeout $timeout_val $*"
-        output=$(sudo "${sudo_args[@]}" timeout "$timeout_val" "$@" 2>&1)
+        test_info "Running: timeout $timeout_val sudo ${sudo_args[*]} $*"
+        output=$(timeout "$timeout_val" sudo "${sudo_args[@]}" "$@" 2>&1)
     else
         test_info "Running: timeout $timeout_val $*"
         output=$(timeout "$timeout_val" "$@" 2>&1)
@@ -129,7 +151,7 @@ run_with_timeout() {
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
     $SUDO $RUNTIME delete $TEST_CONTAINER >/dev/null 2>&1 || true
-    rm -rf "$NS_RUN_DIR/$TEST_CONTAINER" || true
+    $SUDO rm -rf "$NS_RUN_DIR/$TEST_CONTAINER" >/dev/null 2>&1 || true
 }
 
 trap cleanup EXIT
@@ -212,7 +234,12 @@ if [ ! -d "$TEST_BUNDLE/rootfs/bin" ]; then
     exit 1
 fi
 BIN_COUNT=$(ls $TEST_BUNDLE/rootfs/bin/ 2>/dev/null | wc -l)
-test_pass "Root filesystem exists"
+if ! ROOTFS_CHECK_OUTPUT="$(nk_check_rootfs_exec_ready "$TEST_BUNDLE/rootfs" 2>&1)"; then
+    test_fail "Root filesystem is not executable on this host" "$ROOTFS_CHECK_OUTPUT"
+    print_summary
+    exit 1
+fi
+test_pass "Root filesystem exists and is executable"
 test_info "Location: $TEST_BUNDLE"
 test_info "Available: $BIN_COUNT binaries in rootfs/bin/"
 
@@ -287,6 +314,8 @@ if [ $START_RET -ne 0 ]; then
     else
         test_fail "Container start failed (exit code: $START_RET)" "$START_OUTPUT"
     fi
+elif contains_runtime_exec_error "$START_OUTPUT"; then
+    test_fail "Container start reported child execution failure" "$START_OUTPUT"
 elif ! echo "$START_OUTPUT" | grep -q "Status: running"; then
     test_fail "Container start didn't report running state" "$START_OUTPUT"
 else
@@ -389,11 +418,47 @@ else
     test_pass "State file removed"
 fi
 
+# Test 16: Run command (attached + --rm)
+test_start "Run command lifecycle (--rm)"
+RUN_CONTAINER="${TEST_CONTAINER}-run"
+set +e
+RUN_OUTPUT=$(run_with_timeout $TIMEOUT_START $SUDO $RUNTIME run --rm --bundle=$TEST_BUNDLE $RUN_CONTAINER)
+RUN_RET=$?
+set -e
+
+if [ $RUN_RET -ne 0 ]; then
+    if [ $RUN_RET -eq 124 ]; then
+        test_fail "Container run timed out after ${TIMEOUT_START}s"
+    else
+        test_fail "Container run failed (exit code: $RUN_RET)" "$RUN_OUTPUT"
+    fi
+elif contains_runtime_exec_error "$RUN_OUTPUT"; then
+    test_fail "Container run reported child execution failure" "$RUN_OUTPUT"
+elif ! echo "$RUN_OUTPUT" | grep -q "Status: stopped (exit code: 0)"; then
+    test_fail "Container run did not report clean stop" "$RUN_OUTPUT"
+else
+    test_pass "Container run completed without execution errors"
+fi
+
+# Test 17: Verify --rm cleaned up run container
+test_start "Run --rm cleanup"
+set +e
+RUN_STATE_OUTPUT=$(run_with_timeout $TIMEOUT_STATE $RUNTIME state $RUN_CONTAINER)
+RUN_STATE_RET=$?
+set -e
+if [ $RUN_STATE_RET -eq 0 ]; then
+    test_fail "Run container still exists after --rm" "$RUN_STATE_OUTPUT"
+elif ! echo "$RUN_STATE_OUTPUT" | grep -q "not found"; then
+    test_fail "Run --rm cleanup returned unexpected error" "$RUN_STATE_OUTPUT"
+else
+    test_pass "Run --rm removed container state"
+fi
+
 # ============================================================================
 # Error Handling Tests
 # ============================================================================
 
-# Test 16: Create duplicate container ID
+# Test 18: Create duplicate container ID
 test_start "Duplicate ID handling"
 set +e
 PREP_OUTPUT=$(run_with_timeout $TIMEOUT_CREATE $SUDO $RUNTIME create --bundle=$TEST_BUNDLE $TEST_CONTAINER)
@@ -416,7 +481,7 @@ fi
 # Clean up for next tests
 $SUDO $RUNTIME delete $TEST_CONTAINER >/dev/null 2>&1 || true
 
-# Test 17: Start non-existent container
+# Test 19: Start non-existent container
 test_start "Non-existent container handling"
 set +e
 NONEXIST_OUTPUT=$(run_with_timeout $TIMEOUT_START $SUDO $RUNTIME start nonexistent-container)
@@ -428,7 +493,7 @@ else
     test_pass "Non-existent container error handled"
 fi
 
-# Test 18: Delete non-existent container
+# Test 20: Delete non-existent container
 test_start "Non-existent delete"
 set +e
 NONEXIST_DEL_OUTPUT=$(run_with_timeout $TIMEOUT_DELETE $SUDO $RUNTIME delete nonexistent-container)

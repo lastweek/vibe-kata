@@ -92,10 +92,21 @@ case "$host_arch" in
 esac
 
 needs_rootfs=false
-if [ ! -x tests/bundle/rootfs/bin/busybox ]; then
+busybox_path="tests/bundle/rootfs/bin/busybox"
+if [ ! -x "$busybox_path" ]; then
     needs_rootfs=true
-elif [ -n "$expected_pattern" ] && ! file tests/bundle/rootfs/bin/busybox | grep -qi "$expected_pattern"; then
-    needs_rootfs=true
+elif command -v file >/dev/null 2>&1; then
+    busybox_info="$(file "$busybox_path" 2>/dev/null || true)"
+    if [ -n "$expected_pattern" ] && ! printf '%s\n' "$busybox_info" | grep -qi "$expected_pattern"; then
+        needs_rootfs=true
+    else
+        interp_path="$(printf '%s\n' "$busybox_info" | sed -n 's/.*interpreter \([^,]*\).*/\1/p')"
+        if [ -n "$interp_path" ] && [ ! -e "tests/bundle/rootfs${interp_path}" ]; then
+            needs_rootfs=true
+        elif [ -n "$interp_path" ] && [ -n "$expected_pattern" ] && ! file "tests/bundle/rootfs${interp_path}" | grep -qi "$expected_pattern"; then
+            needs_rootfs=true
+        fi
+    fi
 fi
 
 if [ "$needs_rootfs" = true ]; then

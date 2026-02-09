@@ -11,6 +11,7 @@
 
 /* Container states */
 typedef enum {
+    NK_STATE_INVALID = -1,
     NK_STATE_CREATED,
     NK_STATE_RUNNING,
     NK_STATE_STOPPED,

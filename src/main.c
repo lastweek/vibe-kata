@@ -137,9 +137,92 @@ static void print_usage(const char *prog_name) {
 }
 
 static void print_version(void) {
-    printf("nano-sandbox version %d.%d.%d\n",
-           NK_VERSION_MAJOR, NK_VERSION_MINOR, NK_VERSION_PATCH);
-    printf("Educational OCI Container Runtime with VM Isolation\n");
+    nk_log_info("nano-sandbox version %d.%d.%d",
+            NK_VERSION_MAJOR, NK_VERSION_MINOR, NK_VERSION_PATCH);
+    nk_log_info("Educational OCI Container Runtime with VM Isolation");
+}
+
+static const char *safe_str(const char *s) {
+    return (s && s[0] != '\0') ? s : "(none)";
+}
+
+static const char *bool_str(bool v) {
+    return v ? "true" : "false";
+}
+
+static void log_oci_start_summary(const nk_container_t *container, const nk_oci_spec_t *spec) {
+    if (!container || !spec) {
+        return;
+    }
+
+    nk_log_step(3, "Parsed OCI spec for startup");
+    nk_log_info("OCI summary: container=%s mode=%s bundle=%s ociVersion=%s",
+            safe_str(container->id),
+            container->mode == NK_MODE_VM ? "vm" : "container",
+            safe_str(container->bundle_path),
+            safe_str(spec->oci_version));
+
+    nk_log_info("Root: path=%s readonly=%s",
+            spec->root ? safe_str(spec->root->path) : "(missing)",
+            spec->root ? bool_str(spec->root->readonly) : "(missing)");
+
+    if (spec->process) {
+        const nk_oci_process_t *p = spec->process;
+        char cmd[512] = {0};
+        size_t off = 0;
+
+        for (size_t i = 0; i < p->args_len && off < sizeof(cmd) - 1; i++) {
+            const char *arg = p->args && p->args[i] ? p->args[i] : "";
+            int n = snprintf(cmd + off, sizeof(cmd) - off, "%s%s",
+                    i == 0 ? "" : " ", arg);
+            if (n <= 0) {
+                break;
+            }
+            if ((size_t)n >= sizeof(cmd) - off) {
+                off = sizeof(cmd) - 1;
+                break;
+            }
+            off += (size_t)n;
+        }
+
+        nk_log_info("Process: command=%s", cmd[0] ? cmd : "(empty)");
+        nk_log_info("Process cfg: cwd=%s uid=%u gid=%u terminal=%s env=%zu noNewPrivileges=%s",
+                safe_str(p->cwd), (unsigned)p->uid, (unsigned)p->gid,
+                bool_str(p->terminal), p->env_len, bool_str(p->no_new_privileges));
+
+        size_t max_env = p->env_len < 3 ? p->env_len : 3;
+        for (size_t i = 0; i < max_env; i++) {
+            nk_log_debug("Process env[%zu]=%s", i, safe_str(p->env[i]));
+        }
+    } else {
+        nk_log_warn("Process section missing from OCI spec");
+    }
+
+    nk_log_info("Hostname: %s", safe_str(spec->hostname));
+
+    if (spec->linux_config) {
+        nk_log_info("Linux cfg: namespaces=%zu rootfsPropagation=%s mounts=%zu annotations=%zu",
+                spec->linux_config->namespaces_len,
+                safe_str(spec->linux_config->rootfs_propagation),
+                spec->mounts_len,
+                spec->annotations_len);
+        for (size_t i = 0; i < spec->linux_config->namespaces_len; i++) {
+            nk_log_info("Namespace[%zu]: type=%s path=%s",
+                    i,
+                    safe_str(spec->linux_config->namespaces[i].type),
+                    safe_str(spec->linux_config->namespaces[i].path));
+        }
+    } else {
+        nk_log_warn("Linux section missing from OCI spec");
+    }
+
+    for (size_t i = 0; i < spec->mounts_len; i++) {
+        nk_log_debug("Mount[%zu]: src=%s dst=%s type=%s",
+                i,
+                safe_str(spec->mounts[i].source),
+                safe_str(spec->mounts[i].destination),
+                safe_str(spec->mounts[i].type));
+    }
 }
 
 int nk_parse_args(int argc, char *argv[], nk_options_t *opts) {
@@ -410,9 +493,8 @@ int nk_container_create(const nk_options_t *opts) {
     nk_log_debug("Step 3 complete (spec valid)");
     nk_log_debug("OCI spec validation passed");
 
-    fprintf(stdout, "  Bundle: %s\n", opts->bundle_path);
-    fprintf(stdout, "  Root: %s\n", spec->root ? spec->root->path : "none");
-    fflush(stdout);
+    nk_log_info("Bundle: %s", opts->bundle_path);
+    nk_log_info("Root: %s", spec->root ? spec->root->path : "none");
 
     /* Create container structure */
     nk_log_debug("Step 4: Creating container metadata structure");
@@ -450,8 +532,7 @@ int nk_container_create(const nk_options_t *opts) {
     nk_oci_spec_free(spec);
     nk_container_free(container);
 
-    fprintf(stdout, "  Status: created\n");
-    fflush(stdout);
+    nk_log_info("Status: created");
     nk_log_debug("Create complete");
 
     return 0;
@@ -484,13 +565,6 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
         return -1;
     }
 
-    /* Only support container mode for now */
-    if (container->mode == NK_MODE_VM) {
-        nk_log_error("VM mode not yet implemented (Phase 3)");
-        nk_container_free(container);
-        return -1;
-    }
-
     /* Load OCI spec */
     nk_log_step(2, "Loading OCI spec");
     nk_oci_spec_t *spec = nk_oci_spec_load(container->bundle_path);
@@ -507,8 +581,18 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
         return -1;
     }
 
+    log_oci_start_summary(container, spec);
+
+    /* Only support container mode for now */
+    if (container->mode == NK_MODE_VM) {
+        nk_log_error("VM mode not yet implemented (Phase 3)");
+        nk_oci_spec_free(spec);
+        nk_container_free(container);
+        return -1;
+    }
+
     /* Build container context from OCI spec */
-    nk_log_step(3, "Building container execution context");
+    nk_log_step(4, "Building container execution context");
     nk_container_ctx_t ctx = {0};
 
     char rootfs_path[PATH_MAX];
@@ -552,9 +636,9 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
     nk_cgroup_config_t cg_cfg = {0};
     ctx.cgroup = &cg_cfg;
 
-    fprintf(stdout, "  Executing: %s\n", ctx.args[0]);
+    nk_log_info("Executing: %s", ctx.args[0]);
 
-    nk_log_step(4, "Executing container process");
+    nk_log_step(5, "Executing container process");
     if (nk_log_educational) {
         nk_log_explain("Calling clone()",
             "clone() system call creates new process with isolated namespaces. "
@@ -581,10 +665,10 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
     free(ctx.namespaces);
     nk_oci_spec_free(spec);
 
-    fprintf(stdout, "  Status: running (PID: %d)\n", (int)pid);
+    nk_log_info("Status: running (PID: %d)", (int)pid);
 
     if (!attach) {
-        fprintf(stdout, "  Mode: detached (like docker start)\n");
+        nk_log_info("Mode: detached (like docker start)");
         nk_container_free(container);
         if (container_exit_code) {
             *container_exit_code = 0;
@@ -592,7 +676,7 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
         return 0;
     }
 
-    fprintf(stdout, "  Mode: attached (waiting for container process)\n");
+    nk_log_info("Mode: attached (waiting for container process)");
     int wait_status = 0;
     if (nk_container_wait(pid, &wait_status) == -1) {
         nk_container_free(container);
@@ -614,7 +698,7 @@ int nk_container_start(const char *container_id, bool attach, int *container_exi
     }
     nk_container_free(container);
 
-    fprintf(stdout, "  Status: stopped (exit code: %d)\n", exit_code);
+    nk_log_info("Status: stopped (exit code: %d)", exit_code);
     if (container_exit_code) {
         *container_exit_code = exit_code;
     }
@@ -654,7 +738,7 @@ int nk_container_run(const nk_options_t *opts) {
 }
 
 int nk_container_delete(const char *container_id) {
-    fprintf(stdout, "Deleting container '%s'\n", container_id);
+    nk_log_info("Deleting container '%s'", container_id);
 
     /* Load container state */
     nk_container_t *container = nk_state_load(container_id);
@@ -665,7 +749,7 @@ int nk_container_delete(const char *container_id) {
 
     /* Stop container if running */
     if (container->state == NK_STATE_RUNNING && container->init_pid > 0) {
-        fprintf(stdout, "  Stopping container (PID: %d)\n", container->init_pid);
+        nk_log_info("Stopping container (PID: %d)", container->init_pid);
 
         /* Send SIGTERM first */
         if (nk_container_signal(container->init_pid, SIGTERM) == 0) {
@@ -675,7 +759,7 @@ int nk_container_delete(const char *container_id) {
             /* Check if process still exists */
             if (kill(container->init_pid, 0) == 0) {
                 /* Force kill if still running */
-                fprintf(stdout, "  Force killing...\n");
+                nk_log_warn("Force killing...");
                 nk_container_signal(container->init_pid, SIGKILL);
             }
         }
@@ -691,7 +775,7 @@ int nk_container_delete(const char *container_id) {
 
     nk_container_free(container);
 
-    fprintf(stdout, "  Status: deleted\n");
+    nk_log_info("Status: deleted");
 
     return 0;
 }
@@ -701,7 +785,7 @@ nk_container_state_t nk_container_state(const char *container_id) {
     nk_container_t *container = nk_state_load(container_id);
     if (!container) {
         nk_stderr( "Error: Container '%s' not found\n", container_id);
-        return -1;
+        return NK_STATE_INVALID;
     }
 
     nk_container_state_t state = container->state;
@@ -762,6 +846,10 @@ int main(int argc, char *argv[]) {
         const char *state_str;
 
         switch (state) {
+        case NK_STATE_INVALID:
+            state_str = "unknown";
+            ret = 1;
+            break;
         case NK_STATE_CREATED:
             state_str = "created";
             break;
@@ -776,6 +864,7 @@ int main(int argc, char *argv[]) {
             break;
         default:
             state_str = "unknown";
+            ret = 1;
             break;
         }
 

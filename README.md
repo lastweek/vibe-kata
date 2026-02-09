@@ -2,17 +2,22 @@
 
 A minimal OCI-compatible container runtime written in C, supporting both pure container and VM-based execution via Firecracker.
 
-## Project Status: Phase 1 Complete ✅
+## Project Status
 
-### What's Implemented
+Core runtime flow is implemented and testable end-to-end:
+- OCI spec parsing + validation
+- lifecycle commands: `create`, `start`, `run`, `delete`, `state`
+- namespace/mount/cgroup process startup path
+- structured state persistence
+- smoke/integration/perf script suites
 
-#### Phase 1: Foundation & OCI Spec Handling
-- [x] Project structure and build system (Makefile)
-- [x] Main header files defining core data structures
-- [x] Command-line interface with create/start/run/delete/state commands
-- [x] OCI spec parser (config.json with jansson)
-- [x] Container state persistence (JSON files in /run/nano-sandbox)
-- [x] Basic integration tests
+## Documentation
+
+Architecture and internals live in [`docs/`](docs/README.md):
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/execution-flow.md`](docs/execution-flow.md)
+- [`docs/kernel-mechanisms.md`](docs/kernel-mechanisms.md)
+- [`docs/build-and-test.md`](docs/build-and-test.md)
 
 ## Building
 
@@ -166,6 +171,11 @@ nano-sandbox/
 │   ├── vm-sync-test.sh      # macOS -> VM sync + remote test
 │   ├── suites/              # Smoke/integration suites
 │   └── perf/                # Perf benchmark scripts
+├── docs/
+│   ├── architecture.md      # Component boundaries and data paths
+│   ├── execution-flow.md    # create/start/run/delete/state flow maps
+│   ├── kernel-mechanisms.md # namespaces/mounts/cgroups/process internals
+│   └── build-and-test.md    # build/install/test and remote workflows
 ├── tests/
 │   ├── bundle/
 │   │   ├── config.json      # OCI spec for testing

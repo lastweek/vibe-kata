@@ -1,5 +1,7 @@
 # Quick Start: Running Your First Container
 
+For runtime internals and architecture, see [`docs/README.md`](docs/README.md).
+
 ## Step 1: Build and Install nano-sandbox
 
 ```bash
@@ -108,7 +110,10 @@ This will explain:
 - Or run `./scripts/setup-rootfs.sh` to setup rootfs
 
 **"Failed to execute /bin/sh"**
-- Rootfs not set up. Run `./scripts/setup-rootfs.sh`
+- Rootfs is missing or not executable on this host architecture.
+- Repair and reinstall:
+  - `./scripts/setup-rootfs.sh --force`
+  - `make install`
 
 **"Exec format error" when starting container**
 - Rootfs architecture does not match host CPU (for example `x86_64` rootfs on `aarch64` host)

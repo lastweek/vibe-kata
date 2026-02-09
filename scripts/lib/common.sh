@@ -72,10 +72,64 @@ nk_require_installed_runtime() {
 nk_require_installed_bundle() {
     [ -d "$NS_TEST_BUNDLE" ] || nk_die "bundle not found at $NS_TEST_BUNDLE. Run: make install"
     [ -d "$NS_TEST_BUNDLE/rootfs/bin" ] || nk_die "bundle rootfs missing at $NS_TEST_BUNDLE/rootfs/bin. Run: make install"
+    nk_check_rootfs_exec_ready "$NS_TEST_BUNDLE/rootfs" || \
+        nk_die "bundle rootfs is not executable on this host. Rebuild rootfs and reinstall bundle."
 }
 
 nk_prepare_run_dir() {
     mkdir -p "$NS_RUN_DIR"
+}
+
+nk_host_elf_pattern() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo "x86-64" ;;
+        aarch64|arm64) echo "ARM aarch64" ;;
+        *) echo "" ;;
+    esac
+}
+
+nk_check_rootfs_exec_ready() {
+    local rootfs="$1"
+    local busybox="$rootfs/bin/busybox"
+    local shbin="$rootfs/bin/sh"
+
+    if [ ! -d "$rootfs" ]; then
+        echo "rootfs directory not found: $rootfs" >&2
+        return 1
+    fi
+    if [ ! -x "$busybox" ]; then
+        echo "missing executable: $busybox" >&2
+        return 1
+    fi
+    if [ ! -L "$shbin" ] && [ ! -x "$shbin" ]; then
+        echo "missing shell entrypoint: $shbin" >&2
+        return 1
+    fi
+
+    if command -v file >/dev/null 2>&1; then
+        local expected_pattern busybox_info interp_path
+        expected_pattern="$(nk_host_elf_pattern)"
+        busybox_info="$(file "$busybox" 2>/dev/null || true)"
+
+        if [ -n "$expected_pattern" ] && ! printf '%s\n' "$busybox_info" | grep -qi "$expected_pattern"; then
+            echo "busybox architecture mismatch for host $(uname -m): $busybox_info" >&2
+            return 1
+        fi
+
+        interp_path="$(printf '%s\n' "$busybox_info" | sed -n 's/.*interpreter \([^,]*\).*/\1/p')"
+        if [ -n "$interp_path" ]; then
+            if [ ! -e "$rootfs$interp_path" ]; then
+                echo "missing busybox interpreter in rootfs: $interp_path" >&2
+                return 1
+            fi
+            if [ -n "$expected_pattern" ] && ! file "$rootfs$interp_path" | grep -qi "$expected_pattern"; then
+                echo "interpreter architecture mismatch for host $(uname -m): $(file "$rootfs$interp_path")" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    return 0
 }
 
 nk_run_named_script() {
