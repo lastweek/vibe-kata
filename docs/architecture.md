@@ -4,6 +4,26 @@
 
 `nano-sandbox` is an educational OCI runtime focused on showing how a container runtime is assembled from Linux building blocks. It supports OCI bundle parsing, lifecycle commands, namespace-based isolation, cgroups integration, and structured runtime state.
 
+## High-Level Topology
+
+```mermaid
+flowchart LR
+    U[User / Scripts] --> CLI[ns-runtime CLI<br/>src/main.c]
+    CLI --> OCI[OCI Parser<br/>src/oci/spec.c]
+    CLI --> EXEC[Execution Layer<br/>src/container/*.c]
+    CLI --> STATE[State Store<br/>src/common/state.c]
+    CLI --> LOG[Logging<br/>src/common/log.c]
+
+    OCI --> EXEC
+    EXEC --> KERNEL[Linux Kernel Primitives<br/>clone/ns/mount/cgroup/execve]
+    EXEC --> STATE
+    STATE --> FS[(State Filesystem)]
+
+    INSTALL[Makefile + scripts] --> BUNDLE[(Installed Bundle<br/>/usr/local/share/nano-sandbox/bundle)]
+    INSTALL --> BIN[(Installed Binary<br/>/usr/local/bin/ns-runtime)]
+    BUNDLE --> CLI
+```
+
 ## Core Components
 
 ### CLI + Orchestration
@@ -53,6 +73,22 @@
   - Remote test execution on VM/ECS
 
 ## Runtime Data Paths
+
+```mermaid
+flowchart TD
+    subgraph Install
+      A[make install] --> B[/usr/local/bin/ns-runtime]
+      A --> C[/usr/local/share/nano-sandbox/bundle]
+    end
+
+    subgraph Runtime
+      D[ns-runtime create/start/run] --> E[/run/nano-sandbox/[container-id]/state.json]
+      D --> F[clone + namespaces + mount + cgroup]
+      F --> G[execve OCI process]
+    end
+
+    C --> D
+```
 
 ### Binary + Bundle Install
 - Runtime binary: `/usr/local/bin/ns-runtime`

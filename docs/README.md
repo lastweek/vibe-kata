@@ -16,6 +16,7 @@ These docs describe:
 - Exact command execution paths (`create`, `start`, `run`, `delete`, `state`)
 - Linux primitives used under the hood (namespaces, mounts, cgroups, process model)
 - Local/VM/ECS build-test workflows and reliability checks
+- Mermaid diagrams that render directly in GitHub
 
 ## Source of Truth
 

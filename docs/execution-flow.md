@@ -8,6 +8,22 @@
 - `delete`: stop running process (if needed), cleanup cgroup/state.
 - `state`: query persisted state; non-zero exit for not found.
 
+## Command Dispatch Map
+
+```mermaid
+flowchart TD
+    A[CLI args parsed] --> B{command}
+    B -->|create| C[nk_container_create]
+    B -->|start| D[nk_container_start]
+    B -->|run| E[nk_container_run]
+    B -->|delete| F[nk_container_delete]
+    B -->|state| G[nk_container_state]
+    B -->|help/version| H[print help/version]
+
+    E --> C
+    E --> D
+```
+
 ## `create` Flow
 
 1. Parse args and validate command shape.
@@ -36,6 +52,22 @@ Output expectation:
    - detached mode returns immediately
    - attached mode waits for child exit, then persists `STOPPED`
 
+```mermaid
+flowchart TD
+    S1[load saved container state] --> S2{state == CREATED?}
+    S2 -->|no| Sx[fail]
+    S2 -->|yes| S3[load + validate OCI spec]
+    S3 --> S4[build nk_container_ctx]
+    S4 --> S5[nk_container_exec]
+    S5 --> S6{exec startup ok?}
+    S6 -->|no| Sx
+    S6 -->|yes| S7[save RUNNING + pid]
+    S7 --> S8{attach mode?}
+    S8 -->|no| S9[return success detached]
+    S8 -->|yes| S10[wait child exit]
+    S10 --> S11[save STOPPED + exit code]
+```
+
 ## `run` Flow
 
 1. Execute `create` flow.
@@ -62,6 +94,27 @@ Return semantics:
    - ready -> continue + state update
    - error/EOF -> fail startup
 
+```mermaid
+sequenceDiagram
+    participant P as Parent (ns-runtime)
+    participant C as Child (clone target)
+    participant K as Kernel
+
+    P->>P: build clone flags + create sync pipe
+    P->>K: clone(child_fn, flags)
+    K-->>C: start child context
+    C->>C: set role CHILD + setup rootfs/mounts
+    C->>C: setup hostname/caps/rlimits
+    C-->>P: write READY byte on sync pipe
+    P->>P: read sync byte
+    alt READY
+      P->>P: persist RUNNING + pid
+      C->>K: execve(process args)
+    else ERROR/EOF
+      P->>P: startup fail path
+    end
+```
+
 ## `delete` Flow
 
 1. Load state.
@@ -82,3 +135,16 @@ Failure classes are surfaced in three layers:
 1. Runtime return code (`main` command exit status)
 2. Structured logs (parent/child role + file:line)
 3. Integration tests that parse outputs for startup failure patterns
+
+## Lifecycle State Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED: create
+    CREATED --> RUNNING: start or run
+    RUNNING --> STOPPED: attached wait exit
+    CREATED --> DELETED: delete
+    RUNNING --> DELETED: delete
+    STOPPED --> DELETED: delete
+    DELETED --> [*]
+```
